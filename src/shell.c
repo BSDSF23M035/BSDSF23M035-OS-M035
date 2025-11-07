@@ -1,111 +1,185 @@
+#define _GNU_SOURCE
 #include "shell.h"
 
-static char* history[HISTORY_SIZE];
-static int history_count = 0;
+/* Job table */
+static Job jobs[MAX_JOBS] = {0};
 
-char* read_cmd(char* prompt, FILE* fp) {
-    printf("%s", prompt);
-    char* cmdline = (char*) malloc(sizeof(char) * MAX_LEN);
-    int c, pos = 0;
+/* Command list built from PATH for completion */
+static char *command_list[MAX_COMMANDS];
+static int command_count = 0;
 
-    while ((c = getc(fp)) != EOF) {
-        if (c == '\n') break;
-        cmdline[pos++] = c;
-    }
-
-    if (c == EOF && pos == 0) {
-        free(cmdline);
-        return NULL;
-    }
-
-    cmdline[pos] = '\0';
-    return cmdline;
+/* Read a line using readline */
+char *read_cmdline(void) {
+    char *input = readline(PROMPT); /* caller must free */
+    return input;
 }
 
-char** tokenize(char* cmdline) {
-    if (cmdline == NULL || cmdline[0] == '\0' || cmdline[0] == '\n') return NULL;
+/* Tokenize using whitespace. Caller must free returned pointers. */
+char **tokenize(char *line) {
+    if (line == NULL) return NULL;
+    int bufsize = MAX_ARGV;
+    char **tokens = malloc(sizeof(char*) * bufsize);
+    if (!tokens) { perror("malloc"); exit(EXIT_FAILURE); }
 
-    char** arglist = (char**)malloc(sizeof(char*) * (MAXARGS + 1));
-    for (int i = 0; i < MAXARGS + 1; i++) {
-        arglist[i] = (char*)malloc(sizeof(char) * ARGLEN);
-        bzero(arglist[i], ARGLEN);
+    int idx = 0;
+    char *tok = strtok(line, " \t");
+    while (tok != NULL && idx < bufsize - 1) {
+        tokens[idx++] = strdup(tok);
+        tok = strtok(NULL, " \t");
     }
-
-    char* cp = cmdline;
-    char* start;
-    int len;
-    int argnum = 0;
-
-    while (*cp != '\0' && argnum < MAXARGS) {
-        while (*cp == ' ' || *cp == '\t') cp++;
-        if (*cp == '\0') break;
-        start = cp;
-        len = 1;
-        while (*++cp != '\0' && !(*cp == ' ' || *cp == '\t')) len++;
-        strncpy(arglist[argnum], start, len);
-        arglist[argnum][len] = '\0';
-        argnum++;
-    }
-
-    if (argnum == 0) {
-        for(int i = 0; i < MAXARGS + 1; i++) free(arglist[i]);
-        free(arglist);
-        return NULL;
-    }
-
-    arglist[argnum] = NULL;
-    return arglist;
+    tokens[idx] = NULL;
+    return tokens;
 }
 
-/* ---------------- HISTORY FUNCTIONS ---------------- */
-
-void add_history(const char* cmd) {
-    if (cmd == NULL || strlen(cmd) == 0) return;
-    if (history_count < HISTORY_SIZE) {
-        history[history_count++] = strdup(cmd);
-    } else {
-        free(history[0]);
-        for (int i = 1; i < HISTORY_SIZE; i++) {
-            history[i - 1] = history[i];
-        }
-        history[HISTORY_SIZE - 1] = strdup(cmd);
-    }
-}
-
-void show_history() {
-    for (int i = 0; i < history_count; i++) {
-        printf("%d  %s\n", i + 1, history[i]);
-    }
-}
-
-char* get_history_command(int index) {
-    if (index < 1 || index > history_count) {
-        printf("No such command in history.\n");
-        return NULL;
-    }
-    return strdup(history[index - 1]);
-}
-
-int handle_builtin(char** arglist) {
-    if (strcmp(arglist[0], "exit") == 0) {
-        printf("Exiting shell...\n");
+/* Builtins: exit, cd, help, jobs */
+int handle_builtin(char **argv) {
+    if (argv == NULL || argv[0] == NULL) return 1;
+    if (strcmp(argv[0], "exit") == 0) {
+        rl_clear_history();
         exit(0);
-    } else if (strcmp(arglist[0], "cd") == 0) {
-        if (arglist[1] == NULL)
+    } else if (strcmp(argv[0], "cd") == 0) {
+        if (argv[1] == NULL) {
             fprintf(stderr, "cd: missing argument\n");
-        else if (chdir(arglist[1]) != 0)
-            perror("cd failed");
+        } else {
+            if (chdir(argv[1]) != 0) perror("cd");
+        }
         return 1;
-    } else if (strcmp(arglist[0], "help") == 0) {
-        printf("Built-in commands:\n");
-        printf("cd <dir>\nexit\nhelp\njobs\nhistory\n!n\n");
+    } else if (strcmp(argv[0], "help") == 0) {
+        printf("Built-ins:\n  cd <dir>\n  exit\n  help\n  jobs\n");
+        printf("Use '&' suffix to run in background.\n");
         return 1;
-    } else if (strcmp(arglist[0], "jobs") == 0) {
-        printf("Job control not yet implemented.\n");
-        return 1;
-    } else if (strcmp(arglist[0], "history") == 0) {
-        show_history();
+    } else if (strcmp(argv[0], "jobs") == 0) {
+        show_jobs();
         return 1;
     }
     return 0;
+}
+
+/* Job functions */
+void add_job(pid_t pid, const char *cmd, int *jobno_out) {
+    for (int i = 0; i < MAX_JOBS; ++i) {
+        if (!jobs[i].active) {
+            jobs[i].pid = pid;
+            jobs[i].active = 1;
+            strncpy(jobs[i].cmd, cmd, sizeof(jobs[i].cmd)-1);
+            jobs[i].cmd[sizeof(jobs[i].cmd)-1] = '\0';
+            if (jobno_out) *jobno_out = i + 1;
+            return;
+        }
+    }
+    if (jobno_out) *jobno_out = -1;
+    fprintf(stderr, "jobs: job table full\n");
+}
+
+void show_jobs(void) {
+    printf("Job list:\n");
+    for (int i = 0; i < MAX_JOBS; ++i) {
+        if (jobs[i].active) {
+            printf("[%d] PID: %d\t%s\n", i+1, jobs[i].pid, jobs[i].cmd);
+        }
+    }
+}
+
+/* Reap finished background children (non-blocking) */
+void cleanup_jobs(void) {
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        for (int i = 0; i < MAX_JOBS; ++i) {
+            if (jobs[i].active && jobs[i].pid == pid) {
+                jobs[i].active = 0;
+                if (WIFEXITED(status)) {
+                    printf("\n[Done] PID %d Exit %d CMD: %s\n", pid, WEXITSTATUS(status), jobs[i].cmd);
+                } else if (WIFSIGNALED(status)) {
+                    printf("\n[Terminated] PID %d Signal %d CMD: %s\n", pid, WTERMSIG(status), jobs[i].cmd);
+                } else {
+                    printf("\n[Finished] PID %d CMD: %s\n", pid, jobs[i].cmd);
+                }
+                fflush(stdout);
+                break;
+            }
+        }
+    }
+}
+
+/* ---------------- Command list (PATH) for completion ---------------- */
+
+/* Helper: add unique command to list */
+static void add_command_name(const char *name) {
+    if (command_count >= MAX_COMMANDS) return;
+    for (int i = 0; i < command_count; ++i) {
+        if (strcmp(command_list[i], name) == 0) return; /* already present */
+    }
+    command_list[command_count++] = strdup(name);
+}
+
+/* Scan PATH and add all executable names (unique) */
+void init_command_list(void) {
+    const char *path = getenv("PATH");
+    if (!path) return;
+    char *pathdup = strdup(path);
+    char *dir = strtok(pathdup, ":");
+    while (dir) {
+        DIR *d = opendir(dir);
+        if (d) {
+            struct dirent *entry;
+            while ((entry = readdir(d)) != NULL) {
+                if (entry->d_name[0] == '.') continue;
+                /* Create full path */
+                char full[MAX_CMD_LEN];
+                snprintf(full, sizeof(full), "%s/%s", dir, entry->d_name);
+                if (access(full, X_OK) == 0) {
+                    add_command_name(entry->d_name);
+                }
+            }
+            closedir(d);
+        }
+        dir = strtok(NULL, ":");
+    }
+    free(pathdup);
+
+    /* also add builtins */
+    add_command_name("cd");
+    add_command_name("exit");
+    add_command_name("help");
+    add_command_name("jobs");
+}
+
+/* Free command list */
+void free_command_list(void) {
+    for (int i = 0; i < command_count; ++i) free(command_list[i]);
+    command_count = 0;
+}
+
+/* ---------------- Readline completion callbacks ---------------- */
+
+/* Generator for command names (called by rl_completion_matches) */
+char *command_generator(const char *text, int state) {
+    static int idx;
+    static size_t len;
+    if (state == 0) {
+        idx = 0;
+        len = strlen(text);
+    }
+    while (idx < command_count) {
+        const char *name = command_list[idx++];
+        if (strncmp(name, text, len) == 0) {
+            return strdup(name);
+        }
+    }
+    return NULL;
+}
+
+/* Main completion function:
+ * - if at start of line => complete commands (from PATH + builtins)
+ * - else => use filename completion
+ */
+char **myshell_completion(const char *text, int start, int end) {
+    /* If completion is at first word, complete commands */
+    if (start == 0) {
+        return rl_completion_matches(text, command_generator);
+    } else {
+        /* Default filename completion provided by readline */
+        return rl_completion_matches(text, rl_filename_completion_function);
+    }
 }

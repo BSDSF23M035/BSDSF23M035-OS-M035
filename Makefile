@@ -1,13 +1,16 @@
 CC = gcc
-CFLAGS = -Wall -Iinclude
-SRC = src/main.c src/shell.c src/execute.c
-BIN = bin/myshell
+CFLAGS = -Wall -Iinclude -g
+LDFLAGS = -lreadline
+SRCS = src/main.c src/shell.c src/execute.c
+OUT = bin/myshell
 
-all: $(BIN)
+.PHONY: all clean
 
-$(BIN): $(SRC)
+all: $(OUT)
+
+$(OUT): $(SRCS)
 	mkdir -p bin
-	$(CC) $(CFLAGS) $(SRC) -o $(BIN)
+	$(CC) $(CFLAGS) $(SRCS) -o $(OUT) $(LDFLAGS)
 
 clean:
 	rm -rf bin

@@ -1,41 +1,69 @@
 #include "shell.h"
 
-int main() {
-    char* cmdline;
-    char** arglist;
+/* main loop:
+ * - read line with readline()
+ * - detect trailing '&' to run background
+ * - add non-empty lines to history via add_history()
+ * - tokenize and handle builtins or execute
+ * - cleanup finished background jobs
+ */
 
-    while ((cmdline = read_cmd(PROMPT, stdin)) != NULL) {
+int main(void) {
+    char *line = NULL;
+    char **argv = NULL;
 
-        // --- Handle !n history recall before tokenization ---
-        if (cmdline[0] == '!' && isdigit(cmdline[1])) {
-            int index = atoi(&cmdline[1]);
-            char* hist_cmd = get_history_command(index);
-            if (hist_cmd != NULL) {
-                printf("Re-executing: %s\n", hist_cmd);
-                free(cmdline);
-                cmdline = hist_cmd;
-            } else {
-                free(cmdline);
-                continue;
-            }
+    /* Initialize readline completion function */
+    rl_attempted_completion_function = myshell_completion;
+    rl_completion_append_character = ' ';
+    init_command_list(); /* scan $PATH once to prepare command list */
+
+    while (1) {
+        line = read_cmdline();
+        if (line == NULL) { /* EOF (Ctrl+D) */
+            printf("\n");
+            break;
         }
 
-        // --- Add command to history ---
-        add_history(cmdline);
+        /* Trim leading spaces */
+        char *s = line;
+        while (*s && isspace((unsigned char)*s)) s++;
+        if (*s == '\0') { free(line); cleanup_jobs(); continue; }
 
-        if ((arglist = tokenize(cmdline)) != NULL) {
-            if (!handle_builtin(arglist)) {
-                execute(arglist);
-            }
-
-            for (int i = 0; arglist[i] != NULL; i++)
-                free(arglist[i]);
-            free(arglist);
+        /* Detect trailing '&' */
+        int background = 0;
+        int len = strlen(s);
+        while (len > 0 && isspace((unsigned char)s[len-1])) s[--len] = '\0';
+        if (len > 0 && s[len-1] == '&') {
+            background = 1;
+            s[--len] = '\0';
+            while (len > 0 && isspace((unsigned char)s[len-1])) s[--len] = '\0';
         }
 
-        free(cmdline);
+        if (s[0] == '\0') { free(line); cleanup_jobs(); continue; }
+
+        /* Add to readline history */
+        add_history(s);
+
+        /* Tokenize (note: tokenize duplicates tokens) */
+        argv = tokenize(s);
+        if (argv == NULL) { free(line); cleanup_jobs(); continue; }
+
+        if (!handle_builtin(argv)) {
+            execute_cmd(argv, background);
+        }
+
+        /* Free argv */
+        for (int i = 0; argv[i] != NULL; i++) free(argv[i]);
+        free(argv);
+
+        free(line);
+        cleanup_jobs();
     }
 
-    printf("\nShell exited.\n");
+    /* cleanup */
+    free_command_list();
+    cleanup_jobs();
+    rl_clear_history();
+    printf("Shell exited.\n");
     return 0;
 }

@@ -1,25 +1,19 @@
 #include "shell.h"
 
-/* main loop:
- * - read line with readline()
- * - detect trailing '&' to run background
- * - add non-empty lines to history via add_history()
- * - tokenize and handle builtins or execute
- * - cleanup finished background jobs
- */
+/* Note: main uses readline() directly.  Make sure your Makefile links -lreadline. */
 
 int main(void) {
     char *line = NULL;
     char **argv = NULL;
 
-    /* Initialize readline completion function */
+    /* Initialize completion table for readline */
     rl_attempted_completion_function = myshell_completion;
     rl_completion_append_character = ' ';
-    init_command_list(); /* scan $PATH once to prepare command list */
+    init_command_list();
 
     while (1) {
-        line = read_cmdline();
-        if (line == NULL) { /* EOF (Ctrl+D) */
+        line = readline(PROMPT);
+        if (line == NULL) { /* EOF / Ctrl+D */
             printf("\n");
             break;
         }
@@ -29,38 +23,48 @@ int main(void) {
         while (*s && isspace((unsigned char)*s)) s++;
         if (*s == '\0') { free(line); cleanup_jobs(); continue; }
 
-        /* Detect trailing '&' */
-        int background = 0;
-        int len = strlen(s);
-        while (len > 0 && isspace((unsigned char)s[len-1])) s[--len] = '\0';
-        if (len > 0 && s[len-1] == '&') {
-            background = 1;
-            s[--len] = '\0';
-            while (len > 0 && isspace((unsigned char)s[len-1])) s[--len] = '\0';
-        }
-
-        if (s[0] == '\0') { free(line); cleanup_jobs(); continue; }
-
         /* Add to readline history */
         add_history(s);
 
-        /* Tokenize (note: tokenize duplicates tokens) */
+        /* Tokenize - tokenize will strdup tokens so we can free line */
         argv = tokenize(s);
         if (argv == NULL) { free(line); cleanup_jobs(); continue; }
 
-        if (!handle_builtin(argv)) {
-            execute_cmd(argv, background);
+        /* Handle builtin commands first */
+        if (handle_builtin(argv)) {
+            /* builtin handled: free argv & line and continue */
+            for (int k = 0; argv[k] != NULL; k++) free(argv[k]);
+            free(argv);
+            free(line);
+            cleanup_jobs();
+            continue;
         }
 
-        /* Free argv */
-        for (int i = 0; argv[i] != NULL; i++) free(argv[i]);
-        free(argv);
+        /* Detect whether there's a pipe or redirection in argv */
+        int has_pipe = 0, has_redirect = 0;
+        for (int i = 0; argv[i] != NULL; i++) {
+            if (strcmp(argv[i], "|") == 0) has_pipe = 1;
+            if (strcmp(argv[i], "<") == 0 || strcmp(argv[i], ">") == 0) has_redirect = 1;
+        }
 
+        if (has_pipe) {
+            execute_pipe(argv);
+        } else if (has_redirect) {
+            execute_redirect(argv);
+        } else {
+            execute(argv);
+        }
+
+        /* free argv tokens */
+        for (int k = 0; argv[k] != NULL; k++) free(argv[k]);
+        free(argv);
         free(line);
+
+        /* reap any finished background jobs (non-blocking) */
         cleanup_jobs();
     }
 
-    /* cleanup */
+    /* final cleanup */
     free_command_list();
     cleanup_jobs();
     rl_clear_history();

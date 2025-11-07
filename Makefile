@@ -1,16 +1,22 @@
 CC = gcc
-CFLAGS = -Wall -Iinclude -g
+CFLAGS = -Wall -g
 LDFLAGS = -lreadline
-SRCS = src/main.c src/shell.c src/execute.c
-OUT = bin/myshell
 
-.PHONY: all clean
+OBJS = main.o execute.o shell.o
 
-all: $(OUT)
+all: shell
 
-$(OUT): $(SRCS)
-	mkdir -p bin
-	$(CC) $(CFLAGS) $(SRCS) -o $(OUT) $(LDFLAGS)
+shell: $(OBJS)
+	$(CC) $(CFLAGS) -o shell $(OBJS) $(LDFLAGS)
+
+main.o: main.c shell.h
+	$(CC) $(CFLAGS) -c main.c
+
+execute.o: execute.c shell.h
+	$(CC) $(CFLAGS) -c execute.c
+
+shell.o: shell.c shell.h
+	$(CC) $(CFLAGS) -c shell.c
 
 clean:
-	rm -rf bin
+	rm -f *.o shell

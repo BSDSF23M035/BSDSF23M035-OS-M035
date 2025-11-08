@@ -1,23 +1,16 @@
-CC = gcc
-CFLAGS = -Wall -g -I./include
+CC=gcc
+CFLAGS=-Wall -g
+TARGET=myshell
+SRCS=src/main.c src/shell.c src/execute.c
+OBJS=$(SRCS:.c=.o)
 
-SRC_DIR = src
-OBJ_DIR = obj
-TARGET = myshell
-
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-OBJS = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
-
-all: $(OBJ_DIR) $(TARGET)
+all: $(TARGET)
 
 $(TARGET): $(OBJS)
-	$(CC) $(CFLAGS) -o $@ $(OBJS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(OBJS)
 
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJ_DIR):
-	mkdir -p $(OBJ_DIR)
+%.o: %.c
+	$(CC) $(CFLAGS) -Iinclude -c $< -o $@
 
 clean:
-	rm -rf $(OBJ_DIR) $(TARGET)
+	rm -f $(TARGET) $(OBJS)

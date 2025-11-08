@@ -1,100 +1,74 @@
-#include "shell.h"
+#include "../include/shell.h"
 
-/* builtin handler: returns 1 if handled, 0 otherwise */
-static int handle_builtin(Command *cmd, const char *full_cmdline) {
-    if (cmd->args[0] == NULL) return 0;
-    if (strcmp(cmd->args[0], "exit") == 0) {
-        exit(0);
-    } else if (strcmp(cmd->args[0], "cd") == 0) {
-        char *path = cmd->args[1];
-        if (!path) path = getenv("HOME");
-        if (chdir(path) != 0) perror("cd");
-        return 1;
-    } else if (strcmp(cmd->args[0], "jobs") == 0) {
-        for (int i = 0; i < job_count; ++i) {
-            printf("[%d] %d  %s\n", i + 1, jobs[i].pid, jobs[i].cmdline);
-        }
-        return 1;
-    }
-    return 0;
+// Global variables for IF blocks
+int if_mode = 0;
+char if_cmd[MAX_LINE_LEN];
+char then_block[MAX_BLOCK_LINES][MAX_LINE_LEN];
+char else_block[MAX_BLOCK_LINES][MAX_LINE_LEN];
+int then_count = 0, else_count = 0;
+int in_then = 0, in_else = 0;
+
+void reset_if_state() {
+    if_mode = 0;
+    if_cmd[0] = '\0';
+    then_count = else_count = 0;
+    in_then = in_else = 0;
 }
 
 int main() {
-    char line[MAX_LINE];
+    char line[MAX_CMD_LEN];
 
-    while (1) {
-        /* Reap any finished background jobs before prompt */
-        check_background_jobs();
+    printf("myshell> ");
+    while (fgets(line, sizeof(line), stdin)) {
+        trim_spaces(line);
+        if (strlen(line) == 0) {
+            printf("myshell> ");
+            continue;
+        }
 
-        /* Prompt */
+        // --- IF STRUCTURE DETECTION ---
+        if (strncmp(line, "if ", 3) == 0 && !if_mode) {
+            if_mode = 1;
+            strcpy(if_cmd, line + 3);
+            continue;
+        }
+
+        if (if_mode) {
+            if (strcmp(line, "then") == 0) {
+                in_then = 1;
+                continue;
+            } else if (strcmp(line, "else") == 0) {
+                in_then = 0;
+                in_else = 1;
+                continue;
+            } else if (strcmp(line, "fi") == 0) {
+                execute_if_block();
+                reset_if_state();
+                printf("myshell> ");
+                continue;
+            }
+
+            // Store inside the current block
+            if (in_then) {
+                strcpy(then_block[then_count++], line);
+            } else if (in_else) {
+                strcpy(else_block[else_count++], line);
+            }
+            continue;
+        }
+
+        // --- NORMAL COMMAND EXECUTION ---
+        char *args[MAX_TOKENS];
+        int i = 0;
+        char *token = strtok(line, " ");
+        while (token) {
+            args[i++] = token;
+            token = strtok(NULL, " ");
+        }
+        args[i] = NULL;
+
+        execute_command(args);
         printf("myshell> ");
-        fflush(stdout);
-
-        if (fgets(line, sizeof(line), stdin) == NULL) {
-            printf("\n");
-            break; /* EOF */
-        }
-
-        /* Split by semicolons to support chaining */
-        char *saveptr1;
-        char *segment = strtok_r(line, ";", &saveptr1);
-        while (segment != NULL) {
-            trim_spaces(segment);
-            if (strlen(segment) == 0) {
-                segment = strtok_r(NULL, ";", &saveptr1);
-                continue;
-            }
-
-            int background = 0;
-            int seglen = strlen(segment);
-            /* check for background '&' at end */
-            if (seglen > 0 && segment[seglen - 1] == '&') {
-                background = 1;
-                segment[seglen - 1] = '\0';
-                trim_spaces(segment);
-            }
-
-            /* save a cleaned copy for jobs listing */
-            char saved_cmd[MAX_CMDLEN];
-            strncpy(saved_cmd, segment, MAX_CMDLEN - 1);
-            saved_cmd[MAX_CMDLEN - 1] = '\0';
-
-            /* parse pipeline (this will split on | and set input/output redirections) */
-            Command commands[MAX_COMMANDS];
-            int num_commands = 0;
-            /* strtok in parse_pipeline will modify the segment in-place */
-            if (parse_pipeline(segment, commands, &num_commands) != 0) {
-                fprintf(stderr, "myshell: parse error\n");
-                segment = strtok_r(NULL, ";", &saveptr1);
-                continue;
-            }
-
-            /* If single command and builtin -> handle in shell */
-            if (num_commands == 1 && commands[0].args[0] != NULL && handle_builtin(&commands[0], saved_cmd)) {
-                /* builtin executed */
-            } else {
-                pid_t jobpid = execute_pipeline(commands, num_commands, background);
-                if (background && jobpid > 0) {
-                    add_job(jobpid, saved_cmd);
-                    printf("[bg] %d\n", jobpid);
-                }
-            }
-
-            /* free allocated strings from parse_pipeline */
-            for (int c = 0; c < num_commands; ++c) {
-                for (int a = 0; a < MAX_ARGS && commands[c].args[a] != NULL; ++a) {
-                    free(commands[c].args[a]);
-                }
-                if (commands[c].input_file) {
-                    free(commands[c].input_file);
-                }
-                if (commands[c].output_file) {
-                    free(commands[c].output_file);
-                }
-            }
-
-            segment = strtok_r(NULL, ";", &saveptr1);
-        }
     }
 
     return 0;

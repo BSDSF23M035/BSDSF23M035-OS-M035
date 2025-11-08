@@ -1,135 +1,100 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/types.h>
-#include <sys/wait.h>
+#include "shell.h"
 
-#define MAX_TOKENS 100
-#define MAX_COMMANDS 10
+/* Job list */
+Job jobs[MAX_JOBS];
+int job_count = 0;
 
-typedef struct {
-    char *args[MAX_TOKENS];
-    char *input_file;
-    char *output_file;
-} Command;
+/* Add a background job (pid, command line) */
+void add_job(pid_t pid, const char *cmdline) {
+    if (job_count >= MAX_JOBS) return;
+    jobs[job_count].pid = pid;
+    strncpy(jobs[job_count].cmdline, cmdline, MAX_CMDLEN - 1);
+    jobs[job_count].cmdline[MAX_CMDLEN - 1] = '\0';
+    job_count++;
+}
 
-// Function to parse the command line into commands, handling <, >, and |
-int parse_line(char *line, Command commands[], int *num_commands) {
-    char *token;
+/* Remove job by pid */
+void remove_job(pid_t pid) {
+    for (int i = 0; i < job_count; ++i) {
+        if (jobs[i].pid == pid) {
+            for (int j = i; j < job_count - 1; ++j) jobs[j] = jobs[j + 1];
+            job_count--;
+            return;
+        }
+    }
+}
+
+/* Reap any finished background children (non-blocking) */
+void check_background_jobs() {
+    int status;
+    pid_t pid;
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        remove_job(pid);
+        /* Optional: print message about completion
+           if (WIFEXITED(status)) {
+               printf("[bg] %d done (exit %d)\n", pid, WEXITSTATUS(status));
+           } else if (WIFSIGNALED(status)) {
+               printf("[bg] %d terminated by signal %d\n", pid, WTERMSIG(status));
+           }
+        */
+    }
+}
+
+/* Trim leading/trailing spaces, tabs, and trailing newline */
+void trim_spaces(char *s) {
+    if (s == NULL) return;
+    char *start = s;
+    while (*start && (*start == ' ' || *start == '\t' || *start == '\n')) start++;
+    char *end = s + strlen(s) - 1;
+    while (end >= start && (*end == ' ' || *end == '\t' || *end == '\n')) {
+        *end = '\0';
+        end--;
+    }
+    if (start != s) memmove(s, start, strlen(start) + 1);
+}
+
+/*
+ parse_pipeline: parse a single segment (no ';') into commands separated by '|'.
+ Fills commands[] and sets num_commands. Returns 0 on success, -1 on parse error.
+*/
+int parse_pipeline(char *segment, Command commands[], int *num_commands) {
+    if (!segment || !commands || !num_commands) return -1;
+
+    /* initialize */
+    for (int i = 0; i < MAX_COMMANDS; ++i) {
+        commands[i].input_file = NULL;
+        commands[i].output_file = NULL;
+        for (int j = 0; j < MAX_ARGS; ++j) commands[i].args[j] = NULL;
+    }
+
     int cmd_index = 0, arg_index = 0;
-
-    commands[cmd_index].input_file = NULL;
-    commands[cmd_index].output_file = NULL;
-
-    token = strtok(line, " \t\n");
+    char *token = strtok(segment, " \t\n");
     while (token != NULL) {
         if (strcmp(token, "<") == 0) {
             token = strtok(NULL, " \t\n");
-            if (token) commands[cmd_index].input_file = strdup(token);
+            if (!token) return -1;
+            commands[cmd_index].input_file = strdup(token);
         } else if (strcmp(token, ">") == 0) {
             token = strtok(NULL, " \t\n");
-            if (token) commands[cmd_index].output_file = strdup(token);
+            if (!token) return -1;
+            commands[cmd_index].output_file = strdup(token);
         } else if (strcmp(token, "|") == 0) {
+            /* end current command */
             commands[cmd_index].args[arg_index] = NULL;
             cmd_index++;
+            if (cmd_index >= MAX_COMMANDS) return -1;
             arg_index = 0;
-            commands[cmd_index].input_file = NULL;
-            commands[cmd_index].output_file = NULL;
+            /* ensure next command is zeroed (already done in init) */
         } else {
-            commands[cmd_index].args[arg_index++] = strdup(token);
+            if (arg_index < MAX_ARGS - 1) {
+                commands[cmd_index].args[arg_index++] = strdup(token);
+            } else {
+                return -1;
+            }
         }
         token = strtok(NULL, " \t\n");
     }
-
     commands[cmd_index].args[arg_index] = NULL;
     *num_commands = cmd_index + 1;
-    return 0;
-}
-
-// Function to execute parsed commands with pipes and redirection
-void execute_commands(Command commands[], int num_commands) {
-    int i;
-    int in_fd = 0; // initial input is stdin
-    int pipefd[2];
-    pid_t pid;
-
-    for (i = 0; i < num_commands; i++) {
-        if (i < num_commands - 1) {
-            if (pipe(pipefd) == -1) {
-                perror("pipe");
-                exit(EXIT_FAILURE);
-            }
-        }
-
-        pid = fork();
-        if (pid == 0) {
-            // --- Child process ---
-
-            // Input redirection
-            if (commands[i].input_file) {
-                int fd_in = open(commands[i].input_file, O_RDONLY);
-                if (fd_in < 0) {
-                    perror("open input_file");
-                    exit(EXIT_FAILURE);
-                }
-                dup2(fd_in, STDIN_FILENO);
-                close(fd_in);
-            } else if (in_fd != 0) {
-                dup2(in_fd, STDIN_FILENO);
-                close(in_fd);
-            }
-
-            // Output redirection
-            if (commands[i].output_file) {
-                int fd_out = open(commands[i].output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (fd_out < 0) {
-                    perror("open output_file");
-                    exit(EXIT_FAILURE);
-                }
-                dup2(fd_out, STDOUT_FILENO);
-                close(fd_out);
-            } else if (i < num_commands - 1) {
-                dup2(pipefd[1], STDOUT_FILENO);
-                close(pipefd[1]);
-            }
-
-            if (i < num_commands - 1) close(pipefd[0]);
-
-            execvp(commands[i].args[0], commands[i].args);
-            perror("execvp");
-            exit(EXIT_FAILURE);
-        } else if (pid < 0) {
-            perror("fork");
-            exit(EXIT_FAILURE);
-        }
-
-        // --- Parent process ---
-        wait(NULL);
-        if (in_fd != 0) close(in_fd);
-        if (i < num_commands - 1) {
-            close(pipefd[1]);
-            in_fd = pipefd[0];
-        }
-    }
-}
-
-int main() {
-    char line[1024];
-    Command commands[MAX_COMMANDS];
-    int num_commands;
-
-    while (1) {
-        printf("myshell> ");
-        if (!fgets(line, sizeof(line), stdin)) break;
-
-        // Exit command
-        if (strncmp(line, "exit", 4) == 0) break;
-
-        parse_line(line, commands, &num_commands);
-        execute_commands(commands, num_commands);
-    }
-
     return 0;
 }

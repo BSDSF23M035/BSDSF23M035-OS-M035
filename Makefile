@@ -1,22 +1,23 @@
 CC = gcc
-CFLAGS = -Wall -g
-LDFLAGS = -lreadline
+CFLAGS = -Wall -g -I./include
 
-OBJS = main.o execute.o shell.o
+SRC_DIR = src
+OBJ_DIR = obj
+TARGET = myshell
 
-all: shell
+SRCS = $(wildcard $(SRC_DIR)/*.c)
+OBJS = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
 
-shell: $(OBJS)
-	$(CC) $(CFLAGS) -o shell $(OBJS) $(LDFLAGS)
+all: $(OBJ_DIR) $(TARGET)
 
-main.o: main.c shell.h
-	$(CC) $(CFLAGS) -c main.c
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) -o $@ $(OBJS)
 
-execute.o: execute.c shell.h
-	$(CC) $(CFLAGS) -c execute.c
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	$(CC) $(CFLAGS) -c $< -o $@
 
-shell.o: shell.c shell.h
-	$(CC) $(CFLAGS) -c shell.c
+$(OBJ_DIR):
+	mkdir -p $(OBJ_DIR)
 
 clean:
-	rm -f *.o shell
+	rm -rf $(OBJ_DIR) $(TARGET)

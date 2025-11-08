@@ -1,183 +1,135 @@
-#define _GNU_SOURCE
-#include "shell.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
-/* Job table (only used if background jobs implemented elsewhere) */
-static Job jobs[MAX_JOBS] = {0};
+#define MAX_TOKENS 100
+#define MAX_COMMANDS 10
 
-/* Command list built from PATH for completion */
-static char *command_list[MAX_COMMANDS];
-static int command_count = 0;
+typedef struct {
+    char *args[MAX_TOKENS];
+    char *input_file;
+    char *output_file;
+} Command;
 
-/* Tokenizer: splits by whitespace, returns heap-allocated strings.
- * Caller must free each string and the array.
- */
-char **tokenize(char *line) {
-    if (line == NULL) return NULL;
-    int bufsize = MAX_ARGV;
-    char **tokens = malloc(sizeof(char *) * bufsize);
-    if (!tokens) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
+// Function to parse the command line into commands, handling <, >, and |
+int parse_line(char *line, Command commands[], int *num_commands) {
+    char *token;
+    int cmd_index = 0, arg_index = 0;
 
-    int idx = 0;
-    char *tok = strtok(line, " \t");
-    while (tok != NULL && idx < bufsize - 1) {
-        tokens[idx++] = strdup(tok);
-        tok = strtok(NULL, " \t");
-    }
-    tokens[idx] = NULL;
-    return tokens;
-}
+    commands[cmd_index].input_file = NULL;
+    commands[cmd_index].output_file = NULL;
 
-/* Built-in commands: exit, cd, help, jobs */
-int handle_builtin(char **argv) {
-    if (argv == NULL || argv[0] == NULL) return 1;
-
-    if (strcmp(argv[0], "exit") == 0) {
-        rl_clear_history();
-        exit(0);
-    } else if (strcmp(argv[0], "cd") == 0) {
-        if (argv[1] == NULL) {
-            fprintf(stderr, "cd: missing argument\n");
+    token = strtok(line, " \t\n");
+    while (token != NULL) {
+        if (strcmp(token, "<") == 0) {
+            token = strtok(NULL, " \t\n");
+            if (token) commands[cmd_index].input_file = strdup(token);
+        } else if (strcmp(token, ">") == 0) {
+            token = strtok(NULL, " \t\n");
+            if (token) commands[cmd_index].output_file = strdup(token);
+        } else if (strcmp(token, "|") == 0) {
+            commands[cmd_index].args[arg_index] = NULL;
+            cmd_index++;
+            arg_index = 0;
+            commands[cmd_index].input_file = NULL;
+            commands[cmd_index].output_file = NULL;
         } else {
-            if (chdir(argv[1]) != 0) perror("cd");
+            commands[cmd_index].args[arg_index++] = strdup(token);
         }
-        return 1;
-    } else if (strcmp(argv[0], "help") == 0) {
-        printf("Built-ins:\n  cd <dir>\n  exit\n  help\n  jobs\n");
-        printf("I/O: use '<' and '>' (example: sort < in.txt > out.txt)\n");
-        printf("Pipes: use '|' (example: ls -l | grep txt)\n");
-        return 1;
-    } else if (strcmp(argv[0], "jobs") == 0) {
-        show_jobs();
-        return 1;
+        token = strtok(NULL, " \t\n");
     }
 
-    return 0; /* not a builtin */
+    commands[cmd_index].args[arg_index] = NULL;
+    *num_commands = cmd_index + 1;
+    return 0;
 }
 
-/* Job control helpers (minimal implementation) */
-void add_job(pid_t pid, const char *cmd, int *jobno_out) {
-    for (int i = 0; i < MAX_JOBS; ++i) {
-        if (!jobs[i].active) {
-            jobs[i].pid = pid;
-            jobs[i].active = 1;
-            strncpy(jobs[i].cmd, cmd, sizeof(jobs[i].cmd) - 1);
-            jobs[i].cmd[sizeof(jobs[i].cmd) - 1] = '\0';
-            if (jobno_out) *jobno_out = i + 1;
-            return;
-        }
-    }
-    if (jobno_out) *jobno_out = -1;
-    fprintf(stderr, "jobs: job table full\n");
-}
-
-void show_jobs(void) {
-    int found = 0;
-    for (int i = 0; i < MAX_JOBS; ++i) {
-        if (jobs[i].active) {
-            printf("[%d] PID: %d\t%s\n", i + 1, jobs[i].pid, jobs[i].cmd);
-            found = 1;
-        }
-    }
-    if (!found) printf("No background jobs.\n");
-}
-
-/* Reap finished background children (non-blocking).
- * Prints notice when job finishes and marks slot free.
- */
-void cleanup_jobs(void) {
-    int status;
+// Function to execute parsed commands with pipes and redirection
+void execute_commands(Command commands[], int num_commands) {
+    int i;
+    int in_fd = 0; // initial input is stdin
+    int pipefd[2];
     pid_t pid;
-    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        for (int i = 0; i < MAX_JOBS; ++i) {
-            if (jobs[i].active && jobs[i].pid == pid) {
-                jobs[i].active = 0;
-                if (WIFEXITED(status)) {
-                    printf("\n[Done] PID %d Exit %d CMD: %s\n", pid, WEXITSTATUS(status), jobs[i].cmd);
-                } else if (WIFSIGNALED(status)) {
-                    printf("\n[Terminated] PID %d Signal %d CMD: %s\n", pid, WTERMSIG(status), jobs[i].cmd);
-                } else {
-                    printf("\n[Finished] PID %d CMD: %s\n", pid, jobs[i].cmd);
-                }
-                fflush(stdout);
-                break;
+
+    for (i = 0; i < num_commands; i++) {
+        if (i < num_commands - 1) {
+            if (pipe(pipefd) == -1) {
+                perror("pipe");
+                exit(EXIT_FAILURE);
             }
         }
-    }
-}
 
-/* ---------------- Command list for completion ---------------- */
+        pid = fork();
+        if (pid == 0) {
+            // --- Child process ---
 
-/* Add unique name to command_list */
-static void add_command_name(const char *name) {
-    if (command_count >= MAX_COMMANDS) return;
-    for (int i = 0; i < command_count; ++i) {
-        if (strcmp(command_list[i], name) == 0) return;
-    }
-    command_list[command_count++] = strdup(name);
-}
-
-/* Scan PATH and add executable names to command_list */
-void init_command_list(void) {
-    const char *path = getenv("PATH");
-    if (!path) return;
-    char *pathdup = strdup(path);
-    char *dir = strtok(pathdup, ":");
-    while (dir) {
-        DIR *d = opendir(dir);
-        if (d) {
-            struct dirent *entry;
-            while ((entry = readdir(d)) != NULL) {
-                if (entry->d_name[0] == '.') continue;
-                char full[MAX_CMD_LEN];
-                snprintf(full, sizeof(full), "%s/%s", dir, entry->d_name);
-                if (access(full, X_OK) == 0) {
-                    add_command_name(entry->d_name);
+            // Input redirection
+            if (commands[i].input_file) {
+                int fd_in = open(commands[i].input_file, O_RDONLY);
+                if (fd_in < 0) {
+                    perror("open input_file");
+                    exit(EXIT_FAILURE);
                 }
+                dup2(fd_in, STDIN_FILENO);
+                close(fd_in);
+            } else if (in_fd != 0) {
+                dup2(in_fd, STDIN_FILENO);
+                close(in_fd);
             }
-            closedir(d);
+
+            // Output redirection
+            if (commands[i].output_file) {
+                int fd_out = open(commands[i].output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd_out < 0) {
+                    perror("open output_file");
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd_out, STDOUT_FILENO);
+                close(fd_out);
+            } else if (i < num_commands - 1) {
+                dup2(pipefd[1], STDOUT_FILENO);
+                close(pipefd[1]);
+            }
+
+            if (i < num_commands - 1) close(pipefd[0]);
+
+            execvp(commands[i].args[0], commands[i].args);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        } else if (pid < 0) {
+            perror("fork");
+            exit(EXIT_FAILURE);
         }
-        dir = strtok(NULL, ":");
-    }
-    free(pathdup);
 
-    /* add builtins */
-    add_command_name("cd");
-    add_command_name("exit");
-    add_command_name("help");
-    add_command_name("jobs");
-}
-
-/* Free command list memory */
-void free_command_list(void) {
-    for (int i = 0; i < command_count; ++i) free(command_list[i]);
-    command_count = 0;
-}
-
-/* ---------------- Readline completion callbacks ---------------- */
-
-char *command_generator(const char *text, int state) {
-    static int idx;
-    static size_t len;
-    if (state == 0) {
-        idx = 0;
-        len = strlen(text);
-    }
-    while (idx < command_count) {
-        const char *name = command_list[idx++];
-        if (strncmp(name, text, len) == 0) {
-            return strdup(name);
+        // --- Parent process ---
+        wait(NULL);
+        if (in_fd != 0) close(in_fd);
+        if (i < num_commands - 1) {
+            close(pipefd[1]);
+            in_fd = pipefd[0];
         }
     }
-    return NULL;
 }
 
-char **myshell_completion(const char *text, int start, int end) {
-    if (start == 0) {
-        return rl_completion_matches(text, command_generator);
-    } else {
-        return rl_completion_matches(text, rl_filename_completion_function);
+int main() {
+    char line[1024];
+    Command commands[MAX_COMMANDS];
+    int num_commands;
+
+    while (1) {
+        printf("myshell> ");
+        if (!fgets(line, sizeof(line), stdin)) break;
+
+        // Exit command
+        if (strncmp(line, "exit", 4) == 0) break;
+
+        parse_line(line, commands, &num_commands);
+        execute_commands(commands, num_commands);
     }
+
+    return 0;
 }
